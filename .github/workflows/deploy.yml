@@ -1,0 +1,79 @@
+name: Deploy
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Upload to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "."
+          target: "/var/www/app"
+          debug: true
+
+      - name: Install SSL Certificate
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            # Install certbot if not present
+            if ! command -v certbot &> /dev/null; then
+              apt-get update
+              apt-get install -y certbot
+            fi
+
+            # Create webroot directory for certbot challenge
+            mkdir -p /var/www/certbot
+
+            # Check if certificate exists, if not obtain it
+            if [ ! -d "/etc/letsencrypt/live/contextbase.rohanphulkar.cloud" ]; then
+              # First, start nginx on port 80 only for initial cert
+              cd /var/www/app
+              docker compose down || true
+              
+              # Get certificate using standalone mode
+              certbot certonly --standalone \
+                -d contextbase.rohanphulkar.cloud \
+                --non-interactive \
+                --agree-tos \
+                --email ${{ secrets.SSL_EMAIL }} \
+                --http-01-port 80
+            fi
+
+      - name: Deploy
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /var/www/app
+            docker compose down
+            docker compose build --no-cache
+            docker compose up -d
+
+      - name: Setup SSL Auto-Renewal
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            # Add cron job for auto-renewal if not exists
+            CRON_CMD="0 3 * * * certbot renew --quiet --deploy-hook 'docker compose -f /var/www/app/docker-compose.yml restart client'"
+            (crontab -l 2>/dev/null | grep -v "certbot renew" ; echo "$CRON_CMD") | crontab -
